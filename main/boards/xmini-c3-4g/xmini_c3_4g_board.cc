@@ -8,10 +8,9 @@
 #include "settings.h"
 #include "config.h"
 #include "sleep_timer.h"
-#include "font_awesome_symbols.h"
 #include "adc_battery_monitor.h"
+#include "press_to_talk_mcp_tool.h"
 
-#include <wifi_station.h>
 #include <esp_log.h>
 #include <esp_efuse_table.h>
 #include <driver/i2c_master.h>
@@ -20,10 +19,6 @@
 
 #define TAG "XminiC3Board"
 
-LV_FONT_DECLARE(font_puhui_14_1);
-LV_FONT_DECLARE(font_awesome_14_1);
-
-
 class XminiC3Board : public Ml307Board {
 private:
     i2c_master_bus_handle_t codec_i2c_bus_;
@@ -31,9 +26,9 @@ private:
     esp_lcd_panel_handle_t panel_ = nullptr;
     Display* display_ = nullptr;
     Button boot_button_;
-    bool press_to_talk_enabled_ = false;
     SleepTimer* sleep_timer_ = nullptr;
     AdcBatteryMonitor* adc_battery_monitor_ = nullptr;
+    PressToTalkMcpTool* press_to_talk_tool_ = nullptr;
 
     void InitializeBatteryMonitor() {
         adc_battery_monitor_ = new AdcBatteryMonitor(ADC_UNIT_1, ADC_CHANNEL_4, 100000, 100000, GPIO_NUM_12);
@@ -47,11 +42,8 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-#if CONFIG_USE_ESP_WAKE_WORD
-        sleep_timer_ = new SleepTimer(300);
-#else
+        // Wake word detection will be disabled in light sleep mode
         sleep_timer_ = new SleepTimer(30);
-#endif
         sleep_timer_->OnEnterLightSleepMode([this]() {
             ESP_LOGI(TAG, "Enabling sleep mode");
             // Show the standby screen
@@ -138,51 +130,31 @@ private:
         ESP_LOGI(TAG, "Turning display on");
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
-            {&font_puhui_14_1, &font_awesome_14_1});
+        display_ = new OledDisplay(panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (!press_to_talk_enabled_) {
+            if (!press_to_talk_tool_ || !press_to_talk_tool_->IsPressToTalkEnabled()) {
                 app.ToggleChatState();
             }
         });
         boot_button_.OnPressDown([this]() {
-            if (press_to_talk_enabled_) {
+            if (press_to_talk_tool_ && press_to_talk_tool_->IsPressToTalkEnabled()) {
                 Application::GetInstance().StartListening();
             }
         });
         boot_button_.OnPressUp([this]() {
-            if (press_to_talk_enabled_) {
+            if (press_to_talk_tool_ && press_to_talk_tool_->IsPressToTalkEnabled()) {
                 Application::GetInstance().StopListening();
             }
         });
     }
 
     void InitializeTools() {
-        Settings settings("vendor");
-        press_to_talk_enabled_ = settings.GetInt("press_to_talk", 0) != 0;
-
-        auto& mcp_server = McpServer::GetInstance();
-        mcp_server.AddTool("self.set_press_to_talk",
-            "Switch between press to talk mode (长按说话) and click to talk mode (单击说话).\n"
-            "The mode can be `press_to_talk` or `click_to_talk`.",
-            PropertyList({
-                Property("mode", kPropertyTypeString)
-            }),
-            [this](const PropertyList& properties) -> ReturnValue {
-                auto mode = properties["mode"].value<std::string>();
-                if (mode == "press_to_talk") {
-                    SetPressToTalkEnabled(true);
-                    return true;
-                } else if (mode == "click_to_talk") {
-                    SetPressToTalkEnabled(false);
-                    return true;
-                }
-                throw std::runtime_error("Invalid mode: " + mode);
-            });
+        press_to_talk_tool_ = new PressToTalkMcpTool();
+        press_to_talk_tool_->Initialize();
     }
 
 public:
@@ -220,23 +192,11 @@ public:
         return true;
     }
 
-    void SetPressToTalkEnabled(bool enabled) {
-        press_to_talk_enabled_ = enabled;
-
-        Settings settings("vendor", true);
-        settings.SetInt("press_to_talk", enabled ? 1 : 0);
-        ESP_LOGI(TAG, "Press to talk enabled: %d", enabled);
-    }
-
-    bool IsPressToTalkEnabled() {
-        return press_to_talk_enabled_;
-    }
-
-    virtual void SetPowerSaveMode(bool enabled) override {
-        if (!enabled) {
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        if (level != PowerSaveLevel::LOW_POWER) {
             sleep_timer_->WakeUp();
         }
-        Ml307Board::SetPowerSaveMode(enabled);
+        Ml307Board::SetPowerSaveLevel(level);
     }
 };
 
